@@ -21,6 +21,13 @@
 
 #define CLEAR(x) memset(&(x), 0, sizeof(x))
 
+/**
+ * Wraps icoctl calls to ignore EINTR errors
+ * @param fd file descriptor
+ * @param request ioctl request
+ * @param argp icotl params
+ * @return
+ */
 static int xioctl(int fd, int request, void* argp) {
     int r;
 
@@ -30,7 +37,10 @@ static int xioctl(int fd, int request, void* argp) {
     return r;
 }
 
-
+/**
+ * Opens the video capture device
+ * @param cam_info camera info structure
+ */
 void open_device(struct webcam_info *cam_info) {
     struct stat st;
 
@@ -54,6 +64,11 @@ void open_device(struct webcam_info *cam_info) {
     }
 }
 
+/**
+ * Handles initializing the memory map for the webcam's buffers
+ *
+ * @param cam_info camera info structure
+ */
 void init_mmap(struct webcam_info * cam_info) {
     struct v4l2_requestbuffers req;
 
@@ -110,6 +125,11 @@ void init_mmap(struct webcam_info * cam_info) {
     }
 }
 
+/**
+ * Initializes video capture device
+ *
+ * @param cam_info camera info structure
+ */
 void init_device(struct webcam_info *cam_info) {
     struct v4l2_capability cap;
     struct v4l2_cropcap cropcap;
@@ -137,8 +157,6 @@ void init_device(struct webcam_info *cam_info) {
         exit(EXIT_FAILURE);
     }
 
-    /* Select video input, video standard and tune here. */
-
     CLEAR(cropcap);
 
     cropcap.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
@@ -160,7 +178,6 @@ void init_device(struct webcam_info *cam_info) {
     } else {
         /* Errors ignored. */
     }
-
 
     CLEAR(fmt);
 
@@ -185,6 +202,11 @@ void init_device(struct webcam_info *cam_info) {
     init_mmap(cam_info);
 }
 
+/**
+ * Setup the camera and buffers for video capture
+ *
+ * @param cam_info camera info structure
+ */
 void start_capturing(struct webcam_info *cam_info) {
     unsigned int i;
     enum v4l2_buf_type type;
@@ -206,6 +228,11 @@ void start_capturing(struct webcam_info *cam_info) {
         exit(EXIT_FAILURE);
 }
 
+/**
+ * Stop the camera from capturing
+ *
+ * @param cam_info camera info structure
+ */
 void stop_capturing(struct webcam_info *cam_info) {
     enum v4l2_buf_type type;
     type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
@@ -213,7 +240,12 @@ void stop_capturing(struct webcam_info *cam_info) {
         exit(-1);
 }
 
-
+/**
+ * Read a frame from the camera
+ *
+ * @param cam_info camera info structure
+ * @return error
+ */
 int read_frame(struct webcam_info *cam_info) {
     struct v4l2_buffer buf;
     CLEAR(buf);
@@ -244,43 +276,12 @@ int read_frame(struct webcam_info *cam_info) {
     return buf.index;
 }
 
-void mainloop(struct webcam_info *cam_info) {
-    unsigned int count;
-
-    while (count-- > 0) {
-        for (;;) {
-            fd_set fds;
-            struct timeval tv;
-            int r;
-
-            FD_ZERO(&fds);
-            FD_SET(cam_info->fd, &fds);
-
-            /* Timeout. */
-            tv.tv_sec = 2;
-            tv.tv_usec = 0;
-
-            r = select(cam_info->fd + 1, &fds, NULL, NULL, &tv);
-
-            if (-1 == r) {
-                if (EINTR == errno)
-                    continue;
-                exit(EXIT_FAILURE);
-            }
-
-            if (0 == r) {
-                fprintf(stderr, "select timeout\n");
-                exit(EXIT_FAILURE);
-            }
-
-            if (read_frame(cam_info))
-                break;
-            /* EAGAIN - continue select loop. */
-
-        }
-    }
-}
-
+/**
+ * Gets the next frame from the video
+ *
+ * @param cam_info camera info structure
+ * @return
+ */
 int get_next_frame(struct webcam_info *cam_info) {
     fd_set fds;
     struct timeval tv;
@@ -308,6 +309,12 @@ int get_next_frame(struct webcam_info *cam_info) {
 
     return read_frame(cam_info);
 }
+
+/**
+ * Deallocate frame buffers
+ *
+ * @param cam_info camera info structure
+ */
 void deallocate_buffers(struct webcam_info *cam_info) {
     for (int i = 0; i < cam_info->num_of_buffers; ++i) {
         if (-1 == munmap(cam_info->buffers[i].start, cam_info->buffers[i].length)) {
@@ -316,6 +323,11 @@ void deallocate_buffers(struct webcam_info *cam_info) {
     }
 }
 
+/**
+ * Close camera IO file
+ *
+ * @param cam_info camera info structure
+ */
 void close_device(struct webcam_info *cam_info) {
     close(cam_info->fd);
 }
