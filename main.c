@@ -16,6 +16,7 @@
 
 #define NEW_FRAME_EVENT (SDL_USEREVENT+1)
 #define EXIT_EVENT (SDL_USEREVENT+2)
+#define uchar unsigned char
 
 struct webcam_info g_cam_info;
 int g_thread_exit = 0;
@@ -51,32 +52,48 @@ int process_webcam_video(void *ptr) {
     return 0;
 }
 
+#define BG_MODEL_SIZE 10
 /**
  * Detects if motion has occurred between two frames by differencing
- * @param src1 Frame 1
- * @param src2 Frame 2
- * @param dst Output frame
+ * @param new_frame New frame from video source
+ * @param background_model Background model of the scene
+ * @param output difference output between input frame and background model
+ * @param bg_model_ndx ndx of the background model buffer
  * @return size of output image
  */
-int detect_motion(unsigned char *src1, unsigned char *src2, unsigned char *dst) {
+int detect_motion(const uchar *new_frame, uchar **background_model, uchar *output, int *bg_model_ndx) {
     int i = 0;
     int j = 0;
 
     for (i = 0; i < WIDTH*2; i++) {
         for (j = 0; j < HEIGHT; j++) {
-            int src1_value = *(src1 + (i + j*WIDTH*2));
-            int src2_value = *(src2 + (i + j*WIDTH*2));
+            int frame_value = *(new_frame + (i + j*WIDTH*2));
 
-            int value = src1_value - src2_value;
-
-            if (value < 0) {
-                value = 0;
+            int bg_value = 0;
+            for (int ndx = 0; ndx < BG_MODEL_SIZE; ndx++) {
+                int bg_ndx = (ndx + *bg_model_ndx) % BG_MODEL_SIZE;
+                bg_value += (*(background_model[bg_ndx] + (i + j*WIDTH*2)))/(BG_MODEL_SIZE);
             }
 
-           *(dst + (i + j*WIDTH*2))  = value;
+            if (bg_value < 0) {
+                bg_value = 0;
+            }
+            else if (bg_value > 255) {
+                bg_value = 255;
+            }
+
+            int out_value = frame_value - bg_value;
+
+            if (out_value < 0) {
+                out_value = 0;
+            }
+
+            *(output + (i + j*WIDTH*2))  = out_value;
+            *(background_model[(*bg_model_ndx)] + (i + j*WIDTH*2))  = frame_value;
         }
     }
 
+    *bg_model_ndx = (*bg_model_ndx + 1) % BG_MODEL_SIZE;
     return i*j;
 }
 
@@ -89,14 +106,19 @@ int detect_motion(unsigned char *src1, unsigned char *src2, unsigned char *dst) 
 int main(int argc, char * argv[]) {
     g_cam_info.fd = -1;
     g_cam_info.dev_name = "/dev/video0";
+    uchar * background_model[BG_MODEL_SIZE];
     SDL_Window *win = NULL;
     SDL_Renderer *renderer = NULL;
     SDL_Surface *img = NULL;
     SDL_Thread *fetch_video_thread;
     SDL_Event e;
+    int bg_model_ndx = 0;
 
-    unsigned char *old_buffer = malloc(WIDTH * HEIGHT * 2);
     unsigned char *output_buffer = malloc(WIDTH * HEIGHT * 2);
+
+    for (int i = 0; i < BG_MODEL_SIZE; i++) {
+            background_model[i] = malloc(WIDTH * HEIGHT * 2);
+    }
 
     // Setup webcam for video vapture
     open_device(&g_cam_info);
@@ -138,7 +160,7 @@ int main(int argc, char * argv[]) {
                // On new frame
                 case NEW_FRAME_EVENT:
                     // Find difference between current thread and previous frame
-                    detect_motion(old_buffer, g_cam_info.buffers[e.user.code].start, output_buffer);
+                    detect_motion(g_cam_info.buffers[e.user.code].start, background_model, output_buffer, &bg_model_ndx);
 
                     // Update SDL window with output frame
                     SDL_UpdateTexture(texture, NULL, output_buffer, WIDTH*2);
@@ -146,8 +168,6 @@ int main(int argc, char * argv[]) {
                     SDL_RenderCopy(renderer, texture, NULL, NULL);
                     SDL_RenderPresent(renderer);
 
-                    // Copy current frame to old frame
-                    memcpy(old_buffer, g_cam_info.buffers[e.user.code].start, WIDTH*HEIGHT*2);
                     break;
             }
 
@@ -163,8 +183,11 @@ int main(int argc, char * argv[]) {
     stop_capturing(&g_cam_info);
     deallocate_buffers(&g_cam_info);
     close_device(&g_cam_info);
-    free(old_buffer);
     free(output_buffer);
+
+    for (int i = 0; i < BG_MODEL_SIZE; i++) {
+        free(background_model[i]);
+    }
 
     return 0;
 }
