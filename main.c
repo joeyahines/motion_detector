@@ -111,9 +111,15 @@ void bg_model_set_pixel_value(float *image, int i, int j, int width, const float
     }
 }
 
+int compare(const void * a, const void * b) {
+    return ( *(int*)a - *(int*)b );
+}
+
 void smooth_image(const uchar *image, int width, int height, int filter_size, uchar *output) {
     float *h_smooth;
+    float *values;
     h_smooth = (float *) malloc(sizeof(float) * filter_size * filter_size);
+    values = (float *) malloc(sizeof(float) * filter_size * filter_size);
     int half_w = filter_size / 2;
 
     // Generate smoothing filter
@@ -134,26 +140,36 @@ void smooth_image(const uchar *image, int width, int height, int filter_size, uc
 
                     if (((ii < width) && (ii >= 0)) && ((jj < height) && (jj >= 0))) {
                         uchar pixel_value[3];
-                        yuyv_get_pixel_value(image, ii, jj, width, pixel_value);
+                        yuv_get_pixel_value(image, ii, jj, width, pixel_value);
                         float filter_val = *(h_smooth + (filter_size * (k + half_w) + l + half_w));
                         tmp += filter_val * pixel_value[0];
-                        /*
-                        for (int m = 0; m < 3; m++) {
-                            tmp[m] += filter_val * pixel_value[m];
-                        }
-                        */
+                        *(values + (l + half_w) + (k + half_w) * filter_size) = (float)pixel_value[0];
                     }
                 }
             }
+            float median;
+            qsort(values, filter_size*filter_size, sizeof(float), compare);
+
+            if((filter_size*filter_size)%2 == 0)
+                median = (values[(filter_size*filter_size-1)/2] + values[filter_size*filter_size/2])/2.0;
+            else
+                median = *(values + (filter_size*filter_size/2));
+
+            yuv_get_pixel_value(image, i, j, width, output_pixel);
+
+            if (median > 150) {
+                output_pixel[0] = tmp;
 
 
-            yuyv_get_pixel_value(image, i, j, width, output_pixel);
-            output_pixel[0] = tmp;
+            }
+            else {
+                output_pixel[0] = 0;
+            }
 
-            yuyv_set_pixel_value(output, i, j, width, output_pixel);
+            yuv_set_pixel_value(output, i, j, width, output_pixel);
         }
     }
-
+    free(values);
     free(h_smooth);
 }
 
@@ -223,8 +239,42 @@ void bg_model_to_yuyv(const float *src, uchar *dest, int src_width, int src_heig
     }
 }
 
+void find_motion_box(const uchar *image, SDL_Rect * rect, int width, int height) {
+    int min_x = width;
+    int min_y = height;
+    int max_x = 0;
+    int max_y = 0;
+    uchar pixel_value[3];
+    for (int i = 0; i < width; i += 2) {
+       for (int j = 0; j < height; j++) {
+            yuv_get_pixel_value(image, i, j, width, pixel_value);
+
+            if(pixel_value[0] > 200) {
+                if (i < min_x) {
+                   min_x = i;
+                }
+                else if (i > max_x) {
+                    max_x = i;
+                }
+                if (j < min_y) {
+                    min_y = j;
+                }
+                else if (j > max_y) {
+                    max_y = j;
+                }
+            }
+       }
+    }
+
+    rect->x = min_x*2;
+    rect->y = min_y*2;
+    rect->w = (max_x - min_x)*2;
+    rect->h = (max_y - min_y)*2;
+}
+
+
 #define BG_MODEL_SIZE 10
-#define THRESHOLD 250
+#define THRESHOLD 225
 
 /**
  * Detects if motion has occurred between two frames by differencing
@@ -238,9 +288,9 @@ int detect_motion(const uchar *new_frame, uchar **background_buffer, float *back
                   int *bg_model_ndx) {
     int i = 0;
     int j = 0;
-    uchar *smoothed_image = malloc(WIDTH * HEIGHT * 3);
+    uchar *pre_smoothed_output_image = malloc(WIDTH * HEIGHT * 3);
 
-    smooth_image(new_frame, WIDTH, HEIGHT, 3, smoothed_image);
+    //smooth_image(new_frame, WIDTH, HEIGHT, 3, smoothed_image);
 
     for (i = 0; i < WIDTH; i++) {
         for (j = 0; j < HEIGHT; j++) {
@@ -250,13 +300,13 @@ int detect_motion(const uchar *new_frame, uchar **background_buffer, float *back
             float new_bg_model[3];
             uchar oldest_bg_model[3];
 
-            yuyv_get_pixel_value(smoothed_image, i, j, WIDTH, new_value);
+            yuyv_get_pixel_value(new_frame, i, j, WIDTH, new_value);
             bg_model_get_pixel_value(background_model, i, j, WIDTH, bg_value);
             yuv_get_pixel_value(background_buffer[*bg_model_ndx], i, j, WIDTH, oldest_bg_model);
 
             for (int k = 0; k < 3; k++) {
                 float new_out_value = ((new_value[k] - 127.0f) - (bg_value[k] - 127.0f))+127;
-                //new_out_value = (new_out_value * (*(mask + i + j * WIDTH)/255))+127;
+                new_out_value = (new_out_value * (*(mask + i + j * WIDTH)/255));
 
                 normalized_pixel[k] = new_out_value;
             }
@@ -269,36 +319,36 @@ int detect_motion(const uchar *new_frame, uchar **background_buffer, float *back
 
             pixel_mag = sqrt(pixel_mag);
 
-            for (int k = 0; k < 3; k++) {
-                new_bg_model[k] = (bg_value[k] + ((new_value[k])/ (float)BG_MODEL_SIZE) - ((oldest_bg_model[k])/ (float)BG_MODEL_SIZE));
-            }
-
-            bg_model_set_pixel_value(background_model, i, j, WIDTH, new_bg_model);
 
             if ((int)pixel_mag < THRESHOLD) {
                 uchar out_value[] = {0, 127, 127};
 
-                yuv_set_pixel_value(background_buffer[*bg_model_ndx], i, j, WIDTH, new_value);
-                yuv_set_pixel_value(output, i, j, WIDTH, out_value);
+                yuv_set_pixel_value(pre_smoothed_output_image, i, j, WIDTH, out_value);
 
-                //*(mask + i + j * WIDTH) = *(mask + i + j * WIDTH) == 255 ? 255: *(mask + i + j * WIDTH) + 1;
+
+                *(mask + i + j * WIDTH) = *(mask + i + j * WIDTH) == 255 ? 255: *(mask + i + j * WIDTH) + 5;
             }
             else {
                 uchar out_value[] = {255, 127, 127};
-                yuv_set_pixel_value(output, i, j, WIDTH, out_value);
+                yuv_set_pixel_value(pre_smoothed_output_image, i, j, WIDTH, out_value);
 
-                //*(mask + i + j * WIDTH) = *(mask + i + j * WIDTH) == 0 ? 0: *(mask + i + j * WIDTH) - 1;
+                *(mask + i + j * WIDTH) = *(mask + i + j * WIDTH) == 0 ? 0:(*(mask + i + j * WIDTH) - 5);
             }
 
-
+            for (int k = 0; k < 3; k++) {
+                new_bg_model[k] = (bg_value[k] + ((new_value[k])/ (float)BG_MODEL_SIZE) - ((oldest_bg_model[k])/ (float)BG_MODEL_SIZE));
+            }
+            yuv_set_pixel_value(background_buffer[*bg_model_ndx], i, j, WIDTH, new_value);
+            bg_model_set_pixel_value(background_model, i, j, WIDTH, new_bg_model);
         }
     }
 
     *bg_model_ndx = (*bg_model_ndx + 1) % BG_MODEL_SIZE;
 
-    free(smoothed_image);
+    smooth_image(pre_smoothed_output_image, WIDTH, HEIGHT, 3, output);
+    free(pre_smoothed_output_image);
     return i * j;
-}
+}j
 
 /**
  * Opens webcam interface and SDL to display motion output to the user
@@ -324,6 +374,7 @@ int main(int argc, char *argv[]) {
     uchar *output_frame = malloc(WIDTH * HEIGHT * 3);
     unsigned char *output_buffer = malloc(WIDTH * HEIGHT * 2);
     unsigned char *mask = malloc(WIDTH * HEIGHT);
+    SDL_Rect rect;
 
     for (int i = 0; i < BG_MODEL_SIZE; i++) {
         background_buffer[i] = malloc(WIDTH * HEIGHT * 3);
@@ -388,7 +439,7 @@ int main(int argc, char *argv[]) {
                             blur = blur < 0 ? 0 : blur;
                             break;
                         case SDLK_v:
-                            view = (view + 1) % 4;
+                            view = (view + 1) % 5;
                     }
                     printf("Blur: %d\n", blur);
                     break;
@@ -424,6 +475,8 @@ int main(int argc, char *argv[]) {
                         // Find difference between current thread and previous current_frame
                         detect_motion(current_raw_frame, background_buffer, background_model, mask, output_frame, &bg_model_ndx);
 
+
+
                         switch (view) {
                             case 0:
                                 yuv_to_yuyv(output_frame, output_buffer, WIDTH, HEIGHT);
@@ -434,6 +487,19 @@ int main(int argc, char *argv[]) {
                             case 2:
                                 memcpy(output_buffer, current_raw_frame, WIDTH*HEIGHT*2);
                                 break;
+                            case 3:
+                                for (int i = 0; i < WIDTH; i++) {
+                                    for (int j = 0; j < HEIGHT; j++) {
+                                        uchar pixel_val[3];
+                                        uchar mask_value = *(mask + i + j *WIDTH);
+                                        pixel_val[0] = mask_value;
+                                        pixel_val[1] = 127;
+                                        pixel_val[2] = 127;
+
+                                        yuyv_set_pixel_value(output_buffer, i, j, WIDTH, pixel_val);
+                                    }
+                                }
+                                break;
                             default:
                                 for (int i = 0; i < WIDTH; i++) {
                                     for (int j = 0; j < HEIGHT; j++) {
@@ -442,16 +508,19 @@ int main(int argc, char *argv[]) {
                                         pixel_val[1] = (i/(float)(WIDTH))*255;
                                         pixel_val[2] = 255-(j/(float)HEIGHT)*255;
 
-                                        yuv_set_pixel_value(current_raw_frame, i, j, WIDTH, pixel_val);
+                                        yuv_set_pixel_value(current_frame, i, j, WIDTH, pixel_val);
                                     }
                                 }
-                                yuv_to_yuyv(current_raw_frame, output_buffer, WIDTH, HEIGHT);
+                                yuv_to_yuyv(current_frame, output_buffer, WIDTH, HEIGHT);
                         }
+
+                        find_motion_box(output_frame, &rect, WIDTH, HEIGHT);
 
                         // Update SDL window with output current_frame
                         SDL_UnlockTexture(texture);
                         SDL_RenderClear(renderer);
                         SDL_RenderCopy(renderer, texture, NULL, NULL);
+                        SDL_RenderDrawRect(renderer, &rect);
                         SDL_RenderPresent(renderer);
                     }
                     break;
