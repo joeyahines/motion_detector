@@ -20,11 +20,13 @@
 #define THRESHOLD 225
 #define NEW_FRAME_EVENT (SDL_USEREVENT+1)
 #define EXIT_EVENT (SDL_USEREVENT+2)
+#define NEW_DISPLAY_FRAME_EVENT (SDL_USEREVENT+3)
 
 enum view {WEBCAM, MOTION_OUTPUT, BG_MODEL, MOTION_MASK, COLOR_MAP};
 
 struct webcam_info g_cam_info;
-int g_thread_exit = 0;
+int g_process_thread_exit = 0;
+int g_display_thread_exit = 0;
 
 /**
  * Thread to process new video from the webcam
@@ -32,10 +34,10 @@ int g_thread_exit = 0;
  * @return 0
  */
 int process_webcam_video(void *ptr) {
-    g_thread_exit = 0;
+    g_process_thread_exit = 0;
 
     // While the thread is not exiting
-    while (!g_thread_exit) {
+    while (!g_process_thread_exit) {
         SDL_Event event;
         event.type = NEW_FRAME_EVENT;
 
@@ -148,6 +150,7 @@ void find_motion_box(const uchar *image, SDL_Rect * rect, int width, int height)
     int min_y = height;
     int max_x = 0;
     int max_y = 0;
+    int pixel_count = 0;
 
     uchar pixel_value[3];
     for (int i = 0; i < width; i += 2) {
@@ -167,6 +170,7 @@ void find_motion_box(const uchar *image, SDL_Rect * rect, int width, int height)
                 else if (j > max_y) {
                     max_y = j;
                 }
+                pixel_count++;
             }
        }
     }
@@ -175,7 +179,7 @@ void find_motion_box(const uchar *image, SDL_Rect * rect, int width, int height)
     int rect_height = (max_y - min_y)*2;
     int area = rect_height*rect_width;
 
-    if (area < 10) {
+    if (area < 10 || pixel_count < 300) {
         rect->x = 0;
         rect->y = 0;
         rect->w = 0;
@@ -278,7 +282,6 @@ int main(int argc, char *argv[]) {
     SDL_Window *win = NULL;
     SDL_Renderer *renderer = NULL;
     SDL_Surface *img = NULL;
-    SDL_Thread *fetch_video_thread;
     SDL_Event e;
     int bg_model_ndx = 0;
     int pitch = WIDTH * 2;
@@ -290,6 +293,7 @@ int main(int argc, char *argv[]) {
     unsigned char *output_buffer = malloc(WIDTH * HEIGHT * 2);
     unsigned char *mask = malloc(WIDTH * HEIGHT);
     SDL_Rect rect;
+    char window_name[50];
 
     for (int i = 0; i < BG_MODEL_SIZE; i++) {
         background_buffer[i] = malloc(WIDTH * HEIGHT * 3);
@@ -317,15 +321,14 @@ int main(int argc, char *argv[]) {
     }
 
     // Create SDL Window and Render
-    win = SDL_CreateWindow("motion_detector", 0, 0, WIDTH * 2, HEIGHT * 2, 0);
+    win = SDL_CreateWindow("Motion Detector", 0, 0, WIDTH * 2, HEIGHT * 2, 0);
     renderer = SDL_CreateRenderer(win, -1, SDL_RENDERER_ACCELERATED);
 
     SDL_Texture *texture = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_YUY2, SDL_TEXTUREACCESS_STREAMING, WIDTH,
                                              HEIGHT);
 
     // Start updating video
-    fetch_video_thread = SDL_CreateThread(process_webcam_video, NULL, NULL);
-
+    SDL_CreateThread(process_webcam_video, NULL, NULL);
 
     int blur = 0;
     int view = 0;
@@ -337,7 +340,7 @@ int main(int argc, char *argv[]) {
             switch (e.type) {
                 // On exit, shutdown the camera thread
                 case SDL_QUIT:
-                    g_thread_exit = 1;
+                    g_process_thread_exit = 1;
                     break;
                     // After camera thread has shutdown, goto cleanup
                 case EXIT_EVENT:
@@ -345,20 +348,12 @@ int main(int argc, char *argv[]) {
                     // On new current_frame
                 case SDL_KEYDOWN:
                     switch (e.key.keysym.sym) {
-                        case SDLK_8:
-                            blur++;
-                            break;
-                        case SDLK_2:
-                            blur--;
-                            blur = blur < 0 ? 0 : blur;
-                            break;
                         case SDLK_v:
                             view = (view + 1) % 4;
                             break;
                         case SDLK_c:
                             view = COLOR_MAP;
                     }
-                    printf("Blur: %d\n", blur);
                     break;
                 case NEW_FRAME_EVENT:
                     current_raw_frame = g_cam_info.buffers[e.user.code].start;
@@ -392,20 +387,22 @@ int main(int argc, char *argv[]) {
                         // Find difference between current thread and previous current_frame
                         detect_motion(current_raw_frame, background_buffer, background_model, mask, output_frame, &bg_model_ndx);
 
-
-
                         switch (view) {
                             case MOTION_OUTPUT:
+                                snprintf(window_name, 40, "Motion Detector: Motion Image");
                                 yuv_to_yuyv(output_frame, output_buffer, WIDTH, HEIGHT);
                                 break;
                             case BG_MODEL:
+                                snprintf(window_name, 40, "Motion Detector: Background Model");
                                 bg_model_to_yuyv(background_model, output_buffer, WIDTH, HEIGHT);
                                 break;
                             default:
                             case WEBCAM:
+                                snprintf(window_name, 40, "Motion Detector");
                                 memcpy(output_buffer, current_raw_frame, WIDTH*HEIGHT*2);
                                 break;
                             case MOTION_MASK:
+                                snprintf(window_name, 40, "Motion Detector: Motion Mask");
                                 for (int i = 0; i < WIDTH; i++) {
                                     for (int j = 0; j < HEIGHT; j++) {
                                         uchar pixel_val[3];
@@ -419,6 +416,7 @@ int main(int argc, char *argv[]) {
                                 }
                                 break;
                             case COLOR_MAP:
+                                snprintf(window_name, 40, "Motion Detector: YUYV Color Space");
                                 for (int i = 0; i < WIDTH; i++) {
                                     for (int j = 0; j < HEIGHT; j++) {
                                         uchar pixel_val[3];
@@ -441,6 +439,7 @@ int main(int argc, char *argv[]) {
                         SDL_SetRenderDrawColor(renderer, 0, 255, 0, SDL_ALPHA_OPAQUE);
                         SDL_RenderDrawRect(renderer, &rect);
                         SDL_RenderPresent(renderer);
+                        SDL_SetWindowTitle(win, window_name);
                     }
                     break;
             }
