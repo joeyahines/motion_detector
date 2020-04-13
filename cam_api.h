@@ -25,6 +25,7 @@ struct webcam_info {
     int num_of_buffers;
 };
 
+
 void open_device(struct webcam_info *);
 void init_mmap(struct webcam_info *);
 void init_device(struct webcam_info *);

@@ -14,10 +14,14 @@
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_video.h>
 #include "cam_api.h"
+#include "image_manipulation.h"
 
+#define BG_MODEL_SIZE 10
+#define THRESHOLD 225
 #define NEW_FRAME_EVENT (SDL_USEREVENT+1)
 #define EXIT_EVENT (SDL_USEREVENT+2)
-#define uchar unsigned char
+
+enum view {WEBCAM, MOTION_OUTPUT, BG_MODEL, MOTION_MASK, COLOR_MAP};
 
 struct webcam_info g_cam_info;
 int g_thread_exit = 0;
@@ -53,69 +57,27 @@ int process_webcam_video(void *ptr) {
     return 0;
 }
 
-void yuyv_get_pixel_value(const uchar *image, int i, int j, int width, uchar *pixel) {
-    int i_real = i * 2;
-    uchar new_y_value = *(image + i_real + j * width * 2);
-    uchar new_v_value;
-    uchar new_u_value;
-
-    if ((i_real % 4) == 0) {
-        new_u_value = *(image + i_real + 1 + j * width * 2);
-        new_v_value = *(image + i_real + 3 + j * width * 2);
-    } else {
-        new_u_value = *(image + i_real - 1 + j * width * 2);
-        new_v_value = *(image + i_real + 1 + j * width * 2);
-    }
-
-    pixel[0] = new_y_value;
-    pixel[1] = new_u_value;
-    pixel[2] = new_v_value;
-
-}
-
-void yuyv_set_pixel_value(uchar *image, int i, int j, int width, const uchar *pixel) {
-    int i_real = i * 2;
-
-    *(image + i_real + j * width * 2) = pixel[0];
-
-    if (i_real % 4 == 0) {
-        *(image + i_real + 1 + j * width * 2) = pixel[1];
-        *(image + i_real + 3 + j * width * 2) = pixel[2];
-    } else {
-        *(image + i_real - 1 + j * width * 2) = pixel[1];
-        *(image + i_real + 1 + j * width * 2) = pixel[2];
-    }
-}
-
-void yuv_get_pixel_value(const uchar *image, int i, int j, int width, uchar *pixel) {
-    for (int k = 0; k < 3; k++) {
-        pixel[k] = *(image + i * 3 + j * width * 3 + k);
-    }
-}
-
-void yuv_set_pixel_value(uchar *image, int i, int j, int width, const uchar *pixel) {
-    for (int k = 0; k < 3; k++) {
-        *(image + i * 3 + j * width * 3 + k) = pixel[k];
-    }
-}
-
-void bg_model_get_pixel_value(const float *image, int i, int j, int width, float *pixel) {
-    for (int k = 0; k < 3; k++) {
-        pixel[k] = *(image + i * 3 + j * width * 3 + k);
-    }
-}
-
-void bg_model_set_pixel_value(float *image, int i, int j, int width, const float *pixel) {
-    for (int k = 0; k < 3; k++) {
-        *(image + i * 3 + j * width * 3 + k) = pixel[k];
-    }
-}
-
+/**
+ * Compare function for qsort
+ *
+ * @param a first value to compare
+ * @param b second value to compare
+ * @return difference between a and b
+ */
 int compare(const void * a, const void * b) {
     return ( *(int*)a - *(int*)b );
 }
 
-void smooth_image(const uchar *image, int width, int height, int filter_size, uchar *output) {
+/**
+ * Uses a convolution and median filter so smooth the src
+ *
+ * @param src source src to smooth
+ * @param width width of the src
+ * @param height height of the src
+ * @param filter_size convolution and median filter size to use
+ * @param dest filtered src
+ */
+void smooth_image(const unsigned char *src, int width, int height, int filter_size, unsigned char *dest) {
     float *h_smooth;
     float *values;
     h_smooth = (float *) malloc(sizeof(float) * filter_size * filter_size);
@@ -140,7 +102,7 @@ void smooth_image(const uchar *image, int width, int height, int filter_size, uc
 
                     if (((ii < width) && (ii >= 0)) && ((jj < height) && (jj >= 0))) {
                         uchar pixel_value[3];
-                        yuv_get_pixel_value(image, ii, jj, width, pixel_value);
+                        yuv_get_pixel_value(src, ii, jj, width, pixel_value);
                         float filter_val = *(h_smooth + (filter_size * (k + half_w) + l + half_w));
                         tmp += filter_val * pixel_value[0];
                         *(values + (l + half_w) + (k + half_w) * filter_size) = (float)pixel_value[0];
@@ -155,7 +117,7 @@ void smooth_image(const uchar *image, int width, int height, int filter_size, uc
             else
                 median = *(values + (filter_size*filter_size/2));
 
-            yuv_get_pixel_value(image, i, j, width, output_pixel);
+            yuv_get_pixel_value(src, i, j, width, output_pixel);
 
             if (median > 150) {
                 output_pixel[0] = tmp;
@@ -166,84 +128,27 @@ void smooth_image(const uchar *image, int width, int height, int filter_size, uc
                 output_pixel[0] = 0;
             }
 
-            yuv_set_pixel_value(output, i, j, width, output_pixel);
+            yuv_set_pixel_value(dest, i, j, width, output_pixel);
         }
     }
     free(values);
     free(h_smooth);
 }
 
-void yuyv_to_yuv(const uchar *src, uchar *dest, int src_width, int src_height) {
-    for (int i = 0; i < src_width; i += 2) {
-        int src_i = i * 2;
-        int dest_i = i * 3;
-        for (int j = 0; j < src_height; j++) {
-            uchar y1 = *(src + src_i + j * src_width * 2);
-            uchar y2 = *(src + src_i + 2 + j * src_width * 2);
-            uchar u = *(src + src_i + 1 + j * src_width * 2);
-            uchar v = *(src + src_i + 3 + j * src_width * 2);
-
-            *(dest + dest_i + j * src_width * 3) = y1;
-            *(dest + dest_i + 3 + j * src_width * 3) = y2;
-
-            *(dest + dest_i + 1 + j * src_width * 3) = u;
-            *(dest + dest_i + 4 + j * src_width * 3) = u;
-
-            *(dest + dest_i + 2 + j * src_width * 3) = v;
-            *(dest + dest_i + 5 + j * src_width * 3) = v;
-        }
-    }
-}
-
-void yuv_to_yuyv(const uchar *src, uchar *dest, int src_width, int src_height) {
-    for (int i = 0; i < src_width; i += 2) {
-        int src_i = i * 3;
-        int dest_i = i * 2;
-        for (int j = 0; j < src_height; j++) {
-            uchar y1 = *(src + src_i + j * src_width * 3);
-            uchar y2 = *(src + src_i + 3 + j * src_width * 3);
-
-            uchar u1 = *(src + src_i + 1 + j * src_width * 3);
-            uchar u2 = *(src + src_i + 4 + j * src_width * 3);
-
-            uchar v1 = *(src + src_i + 2 + j * src_width * 3);
-            uchar v2 = *(src + src_i + 5 + j * src_width * 3);
-
-            *(dest + dest_i + j * src_width * 2) = y1;
-            *(dest + dest_i + 2 + j * src_width * 2) = y2;
-            *(dest + dest_i + 1 + j * src_width * 2) = (u1 + u2) / 2;
-            *(dest + dest_i + 3 + j * src_width * 2) = (v1 + v2) / 2;
-        }
-    }
-}
-
-void bg_model_to_yuyv(const float *src, uchar *dest, int src_width, int src_height) {
-    for (int i = 0; i < src_width; i += 2) {
-        int src_i = i * 3;
-        int dest_i = i * 2;
-        for (int j = 0; j < src_height; j++) {
-            uchar y1 = (uchar)*(src + src_i + j * src_width * 3);
-            uchar y2 = (uchar)*(src + src_i + 3 + j * src_width * 3);
-
-            uchar u1 = (uchar)*(src + src_i + 1 + j * src_width * 3);
-            uchar u2 = (uchar)*(src + src_i + 4 + j * src_width * 3);
-
-            uchar v1 = (uchar)*(src + src_i + 2 + j * src_width * 3);
-            uchar v2 = (uchar)*(src + src_i + 5 + j * src_width * 3);
-
-            *(dest + dest_i + j * src_width * 2) = y1;
-            *(dest + dest_i + 2 + j * src_width * 2) = y2;
-            *(dest + dest_i + 1 + j * src_width * 2) = (u1 + u2) / 2;
-            *(dest + dest_i + 3 + j * src_width * 2) = (v1 + v2) / 2;
-        }
-    }
-}
-
+/**
+ * Find the box of motion in the image
+ *
+ * @param image black and white motion image
+ * @param rect SDL rect to populate
+ * @param width width of the motion image
+ * @param height height of motion image
+ */
 void find_motion_box(const uchar *image, SDL_Rect * rect, int width, int height) {
     int min_x = width;
     int min_y = height;
     int max_x = 0;
     int max_y = 0;
+
     uchar pixel_value[3];
     for (int i = 0; i < width; i += 2) {
        for (int j = 0; j < height; j++) {
@@ -266,31 +171,41 @@ void find_motion_box(const uchar *image, SDL_Rect * rect, int width, int height)
        }
     }
 
-    rect->x = min_x*2;
-    rect->y = min_y*2;
-    rect->w = (max_x - min_x)*2;
-    rect->h = (max_y - min_y)*2;
+    int rect_width = (max_x - min_x)*2;
+    int rect_height = (max_y - min_y)*2;
+    int area = rect_height*rect_width;
+
+    if (area < 10) {
+        rect->x = 0;
+        rect->y = 0;
+        rect->w = 0;
+        rect->h = 0;
+    }
+    else {
+        rect->x = min_x*2;
+        rect->y = min_y*2;
+        rect->w = rect_width;
+        rect->h = rect_height;
+    }
+
 }
 
-
-#define BG_MODEL_SIZE 10
-#define THRESHOLD 225
-
 /**
- * Detects if motion has occurred between two frames by differencing
- * @param new_frame New frame from video source
- * @param background_model Background model of the scene
- * @param output difference output between input frame and background model
- * @param bg_model_ndx ndx of the background model buffer
- * @return size of output image
+ * Detects if motion has occurred between by differencing and filtering the new frame with a background model
+ *
+ * @param new_frame new frame from the video service
+ * @param background_buffer background buffer containing
+ * @param background_model background model of the scene
+ * @param mask motion mask of the image
+ * @param output motion image output
+ * @param bg_model_ndx Index of the oldest frame in the background model
+ * @return
  */
 int detect_motion(const uchar *new_frame, uchar **background_buffer, float *background_model, uchar* mask, uchar *output,
                   int *bg_model_ndx) {
     int i = 0;
     int j = 0;
     uchar *pre_smoothed_output_image = malloc(WIDTH * HEIGHT * 3);
-
-    //smooth_image(new_frame, WIDTH, HEIGHT, 3, smoothed_image);
 
     for (i = 0; i < WIDTH; i++) {
         for (j = 0; j < HEIGHT; j++) {
@@ -348,7 +263,7 @@ int detect_motion(const uchar *new_frame, uchar **background_buffer, float *back
     smooth_image(pre_smoothed_output_image, WIDTH, HEIGHT, 3, output);
     free(pre_smoothed_output_image);
     return i * j;
-}j
+}
 
 /**
  * Opens webcam interface and SDL to display motion output to the user
@@ -385,7 +300,6 @@ int main(int argc, char *argv[]) {
             *(mask + i + j*WIDTH) = 255;
         }
     }
-
 
     // Setup webcam for video capture
     open_device(&g_cam_info);
@@ -439,7 +353,10 @@ int main(int argc, char *argv[]) {
                             blur = blur < 0 ? 0 : blur;
                             break;
                         case SDLK_v:
-                            view = (view + 1) % 5;
+                            view = (view + 1) % 4;
+                            break;
+                        case SDLK_c:
+                            view = COLOR_MAP;
                     }
                     printf("Blur: %d\n", blur);
                     break;
@@ -478,16 +395,17 @@ int main(int argc, char *argv[]) {
 
 
                         switch (view) {
-                            case 0:
+                            case MOTION_OUTPUT:
                                 yuv_to_yuyv(output_frame, output_buffer, WIDTH, HEIGHT);
                                 break;
-                            case 1:
+                            case BG_MODEL:
                                 bg_model_to_yuyv(background_model, output_buffer, WIDTH, HEIGHT);
                                 break;
-                            case 2:
+                            default:
+                            case WEBCAM:
                                 memcpy(output_buffer, current_raw_frame, WIDTH*HEIGHT*2);
                                 break;
-                            case 3:
+                            case MOTION_MASK:
                                 for (int i = 0; i < WIDTH; i++) {
                                     for (int j = 0; j < HEIGHT; j++) {
                                         uchar pixel_val[3];
@@ -500,7 +418,7 @@ int main(int argc, char *argv[]) {
                                     }
                                 }
                                 break;
-                            default:
+                            case COLOR_MAP:
                                 for (int i = 0; i < WIDTH; i++) {
                                     for (int j = 0; j < HEIGHT; j++) {
                                         uchar pixel_val[3];
@@ -520,6 +438,7 @@ int main(int argc, char *argv[]) {
                         SDL_UnlockTexture(texture);
                         SDL_RenderClear(renderer);
                         SDL_RenderCopy(renderer, texture, NULL, NULL);
+                        SDL_SetRenderDrawColor(renderer, 0, 255, 0, SDL_ALPHA_OPAQUE);
                         SDL_RenderDrawRect(renderer, &rect);
                         SDL_RenderPresent(renderer);
                     }

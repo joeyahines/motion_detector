@@ -8,5 +8,5 @@ find_package(SDL2 REQUIRED)
 
 include_directories(${SDL2_INCLUDE_DIRS})
 
-add_executable(motion_detector main.c cam_api.c)
+add_executable(motion_detector main.c cam_api.c image_manipulation.c image_manipulation.h)
 target_link_libraries(motion_detector ${SDL2_LIBRARIES} ${JPEG_LIBRARIES} m)
