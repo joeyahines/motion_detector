@@ -20,13 +20,11 @@
 #define THRESHOLD 225
 #define NEW_FRAME_EVENT (SDL_USEREVENT+1)
 #define EXIT_EVENT (SDL_USEREVENT+2)
-#define NEW_DISPLAY_FRAME_EVENT (SDL_USEREVENT+3)
 
 enum view {WEBCAM, MOTION_OUTPUT, BG_MODEL, MOTION_MASK, COLOR_MAP};
 
 struct webcam_info g_cam_info;
 int g_process_thread_exit = 0;
-int g_display_thread_exit = 0;
 
 /**
  * Thread to process new video from the webcam
@@ -205,7 +203,7 @@ void find_motion_box(const uchar *image, SDL_Rect * rect, int width, int height)
  * @param bg_model_ndx Index of the oldest frame in the background model
  * @return
  */
-int detect_motion(const uchar *new_frame, uchar **background_buffer, float *background_model, uchar* mask, uchar *output,
+int detect_motion(const uchar *new_frame, uchar **background_buffer, float *background_model, float* mask, uchar *output,
                   int *bg_model_ndx) {
     int i = 0;
     int j = 0;
@@ -225,7 +223,7 @@ int detect_motion(const uchar *new_frame, uchar **background_buffer, float *back
 
             for (int k = 0; k < 3; k++) {
                 float new_out_value = ((new_value[k] - 127.0f) - (bg_value[k] - 127.0f))+127;
-                new_out_value = (new_out_value * (*(mask + i + j * WIDTH)/255));
+                new_out_value = new_out_value * *(mask + i + j);
 
                 normalized_pixel[k] = new_out_value;
             }
@@ -239,19 +237,20 @@ int detect_motion(const uchar *new_frame, uchar **background_buffer, float *back
             pixel_mag = sqrt(pixel_mag);
 
 
+            float new_mask_value;
             if ((int)pixel_mag < THRESHOLD) {
                 uchar out_value[] = {0, 127, 127};
+                new_mask_value = *(mask + i + j * WIDTH) + 0.01f;
 
                 yuv_set_pixel_value(pre_smoothed_output_image, i, j, WIDTH, out_value);
 
 
-                *(mask + i + j * WIDTH) = *(mask + i + j * WIDTH) == 255 ? 255: *(mask + i + j * WIDTH) + 5;
+                //*(mask + i + j * WIDTH) = *(mask + i + j * WIDTH) == 255 ? 255: *(mask + i + j * WIDTH) + 5;
             }
             else {
                 uchar out_value[] = {255, 127, 127};
+                new_mask_value = *(mask + i + j * WIDTH) - 0.1f;
                 yuv_set_pixel_value(pre_smoothed_output_image, i, j, WIDTH, out_value);
-
-                *(mask + i + j * WIDTH) = *(mask + i + j * WIDTH) == 0 ? 0:(*(mask + i + j * WIDTH) - 5);
             }
 
             for (int k = 0; k < 3; k++) {
@@ -259,6 +258,15 @@ int detect_motion(const uchar *new_frame, uchar **background_buffer, float *back
             }
             yuv_set_pixel_value(background_buffer[*bg_model_ndx], i, j, WIDTH, new_value);
             bg_model_set_pixel_value(background_model, i, j, WIDTH, new_bg_model);
+
+            if (new_mask_value < 0.0) {
+                new_mask_value = 0.0f;
+            }
+            else if (new_mask_value > 1.0) {
+                new_mask_value = 1.0f;
+            }
+            *(mask + i + j * WIDTH) = new_mask_value;
+
         }
     }
 
@@ -290,8 +298,8 @@ int main(int argc, char *argv[]) {
     uchar *current_frame = malloc(WIDTH * HEIGHT * 3);
     float *background_model = malloc(WIDTH * HEIGHT * 3 * sizeof(float));
     uchar *output_frame = malloc(WIDTH * HEIGHT * 3);
-    unsigned char *output_buffer = malloc(WIDTH * HEIGHT * 2);
-    unsigned char *mask = malloc(WIDTH * HEIGHT);
+    uchar *output_buffer = malloc(WIDTH * HEIGHT * 2);
+    float *mask = malloc(WIDTH * HEIGHT * sizeof(float));
     SDL_Rect rect;
     char window_name[50];
 
@@ -301,7 +309,7 @@ int main(int argc, char *argv[]) {
 
     for (int i = 0; i < WIDTH; i++) {
         for (int j = 0; j < HEIGHT; j++) {
-            *(mask + i + j*WIDTH) = 255;
+            *(mask + i + j*WIDTH) = 1.0f;
         }
     }
 
@@ -406,7 +414,7 @@ int main(int argc, char *argv[]) {
                                 for (int i = 0; i < WIDTH; i++) {
                                     for (int j = 0; j < HEIGHT; j++) {
                                         uchar pixel_val[3];
-                                        uchar mask_value = *(mask + i + j *WIDTH);
+                                        uchar mask_value = *(mask + i + j *WIDTH) * 255;
                                         pixel_val[0] = mask_value;
                                         pixel_val[1] = 127;
                                         pixel_val[2] = 127;
