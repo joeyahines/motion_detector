@@ -9,7 +9,6 @@
 #include <stdlib.h>
 #include <errno.h>
 #include <string.h>
-#include <fftw3.h>
 #include <math.h>
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_video.h>
