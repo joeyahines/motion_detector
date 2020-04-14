@@ -354,6 +354,7 @@ int main(int argc, char *argv[]) {
     int view = 0;
     float *mask = malloc(WIDTH * HEIGHT * sizeof(float));
     char window_name[50];
+    int change_window = 0;
 
     // Setup g_cam_info struct
     g_cam_info.fd = -1;
@@ -411,9 +412,11 @@ int main(int argc, char *argv[]) {
                     switch (e.key.keysym.sym) {
                         case SDLK_v:
                             view = (view + 1) % 4;
+                            change_window = 1;
                             break;
                         case SDLK_c:
                             view = COLOR_MAP;
+                            change_window = 1;
                     }
                     break;
                 case NEW_FRAME_EVENT:
@@ -519,8 +522,12 @@ int main(int argc, char *argv[]) {
                         // Update display
                         SDL_RenderPresent(renderer);
 
-                        // Update window title
-                        //SDL_SetWindowTitle(win, window_name);
+                        if (change_window) {
+                            // update window title
+                            SDL_SetWindowTitle(win, window_name);
+                            change_window = 0;
+                        }
+
                     }
                     break;
             }
