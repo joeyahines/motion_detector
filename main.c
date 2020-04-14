@@ -6,15 +6,16 @@
  * Detects motion from the video stream of a webcam or other V4L capture device
  */
 
-#include <libv4l2.h>
 #include <stdlib.h>
 #include <errno.h>
 #include <string.h>
+#include <fftw3.h>
 #include <math.h>
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_video.h>
 #include "cam_api.h"
 #include "image_manipulation.h"
+#include "quick_select.h"
 
 #define BG_MODEL_SIZE 10
 #define THRESHOLD 225
@@ -83,18 +84,20 @@ int compare(const void *a, const void *b) {
  * @param dest filtered src
  */
 void smooth_image(const unsigned char *src, int width, int height, int filter_size, unsigned char *dest) {
-    float *h_smooth;
-    float *neighborhood_values;
+    double *neighborhood_values;
+    double *kernel;
     int half_w = filter_size / 2;
-    int filter_array_size =  filter_size*filter_size;
-    float filter_value = 1.0f / (float)(filter_array_size);
-    h_smooth = (float *) malloc(sizeof(float) * filter_size * filter_size);
-    neighborhood_values = (float *) malloc(sizeof(float) * filter_size * filter_size);
+    double coefficent = 1.0 / (2 * M_PI * 1.5 * 1.5);
+    int L = (filter_size-1)/2;
 
-    // Generate smoothing filter
+    // Allocate kernel and neighborhood values
+    kernel = (double *)malloc(sizeof(double) * width * height);
+    neighborhood_values = (double *) malloc(sizeof(double) * filter_size * filter_size);
+
+    // Generate smoothing kernel
     for (int i = 0; i < filter_size; i++) {
         for (int j = 0; j < filter_size; j++) {
-            *(h_smooth + i * filter_size + j) = filter_value;
+            *(kernel + i+j*filter_size) = coefficent * pow(M_E, -(pow(i - L, 2) + pow(j - L, 2)) / (2 * 1.5 * 1.5));
         }
     }
 
@@ -102,8 +105,8 @@ void smooth_image(const unsigned char *src, int width, int height, int filter_si
     for (int i = 0; i < width; i++) {
         for (int j = 0; j < height; j++) {
             uchar output_pixel[3];
-            float median;
-            float smoothed_value = 0.0f;
+            double median;
+            double smoothed_value = 0.0;
 
             // Smooth pixel
             for (int k = -half_w; k <= half_w; k++) {
@@ -111,45 +114,41 @@ void smooth_image(const unsigned char *src, int width, int height, int filter_si
                     int ii = i + k;
                     int jj = j + l;
 
+                    // If the pixel requested is in bounds
                     if (((ii < width) && (ii >= 0)) && ((jj < height) && (jj >= 0))) {
-                        uchar pixel_value[3];
-                        float filter_val = *(h_smooth + (filter_size * (k + half_w) + l + half_w));
-
-                        yuv_get_pixel_value(src, ii, jj, width, pixel_value);
-                        smoothed_value += filter_val * (float)pixel_value[0];
-
-                        // Added value to neighborhood
-                        *(neighborhood_values + (l + half_w) + (k + half_w) * filter_size) = (float) pixel_value[0];
+                        // Get Y channel value
+                        uchar pixel_value = *(src + ii*3 + jj * width*3);
+                        // Get filter value
+                        double filter_val = *(kernel + (filter_size * (k + half_w) + l + half_w));
+                        // Smooth value
+                        smoothed_value += filter_val * (double) pixel_value;
+                        *(neighborhood_values + (l + half_w) + (k + half_w) * filter_size) = pixel_value;
                     }
                 }
             }
 
-            // Sort neighborhood values
-            qsort(neighborhood_values, filter_size * filter_size, sizeof(float), compare);
-
-            // Find the median value of the neighborhood
-            if (filter_array_size % 2) {
-                median = (neighborhood_values[(filter_array_size - 1) / 2] +
-                          neighborhood_values[filter_array_size / 2]) / 2.0f;
-            }
-            else {
-                median = *(neighborhood_values + (filter_size * filter_size / 2));
-            }
+            // Find median
+            median = quick_select(neighborhood_values, filter_size * filter_size);
 
             // Threshold median
-            if (median > 150) {
-                output_pixel[0] = (uchar)smoothed_value;
+            if (median > 240.0) {
+                output_pixel[0] = 255;
 
             } else {
                 output_pixel[0] = 0;
             }
 
+            output_pixel[1] = 127;
+            output_pixel[2] = 127;
+
             // Set output pixel of smoothed image
             yuv_set_pixel_value(dest, i, j, width, output_pixel);
         }
     }
+
+    // Free malloced arrays
     free(neighborhood_values);
-    free(h_smooth);
+    free(kernel);
 }
 
 /**
@@ -522,7 +521,7 @@ int main(int argc, char *argv[]) {
                         SDL_RenderPresent(renderer);
 
                         // Update window title
-                        SDL_SetWindowTitle(win, window_name);
+                        //SDL_SetWindowTitle(win, window_name);
                     }
                     break;
             }
