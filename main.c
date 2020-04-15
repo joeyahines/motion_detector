@@ -14,21 +14,37 @@
 #include <SDL2/SDL_video.h>
 #include "cam_api.h"
 #include "image_manipulation.h"
-#include "quick_select.h"
+#include "lib/quick_select/quick_select.h"
+#include "lib/libattopng/libattopng.h"
+#ifdef TEST_MODE
+#include <jpeglib.h>
+#include <unistd.h>
+#include <sys/stat.h>
+#include <time.h>
+#endif
 
+// Model Parameters
 #define BG_MODEL_SIZE 10
 #define THRESHOLD 225
+#define FILTER_SIZE 3
+
+// SDL Events
 #define NEW_FRAME_EVENT (SDL_USEREVENT+1)
 #define EXIT_EVENT (SDL_USEREVENT+2)
 
+// Color constants
 const uchar YUV_BLACK[] = {0, 127, 127};
 const uchar YUV_WHITE[] = {255, 127, 127};
 
+// Application views
 enum view {
     WEBCAM, MOTION_OUTPUT, BG_MODEL, MOTION_MASK, COLOR_MAP
 };
 
+// Global webcam info struct
 struct webcam_info g_cam_info;
+
+// Flag to exit processing thread
 int g_process_thread_exit = 0;
 
 /**
@@ -63,17 +79,6 @@ int process_webcam_video(void *ptr) {
 }
 
 /**
- * Compare function for qsort
- *
- * @param a first value to compare
- * @param b second value to compare
- * @return difference between a and b
- */
-int compare(const void *a, const void *b) {
-    return (*(int *) a - *(int *) b);
-}
-
-/**
  * Uses a convolution and median filter so smooth the Y channel of the src image
  *
  * @param src source src to smooth
@@ -87,16 +92,16 @@ void smooth_image(const unsigned char *src, int width, int height, int filter_si
     double *kernel;
     int half_w = filter_size / 2;
     double coefficent = 1.0 / (2 * M_PI * 1.5 * 1.5);
-    int L = (filter_size-1)/2;
+    int L = (filter_size - 1) / 2;
 
     // Allocate kernel and neighborhood values
-    kernel = (double *)malloc(sizeof(double) * width * height);
+    kernel = (double *) malloc(sizeof(double) * width * height);
     neighborhood_values = (double *) malloc(sizeof(double) * filter_size * filter_size);
 
     // Generate smoothing kernel
     for (int i = 0; i < filter_size; i++) {
         for (int j = 0; j < filter_size; j++) {
-            *(kernel + i+j*filter_size) = coefficent * pow(M_E, -(pow(i - L, 2) + pow(j - L, 2)) / (2 * 1.5 * 1.5));
+            *(kernel + i + j * filter_size) = coefficent * pow(M_E, -(pow(i - L, 2) + pow(j - L, 2)) / (2 * 1.5 * 1.5));
         }
     }
 
@@ -116,7 +121,7 @@ void smooth_image(const unsigned char *src, int width, int height, int filter_si
                     // If the pixel requested is in bounds
                     if (((ii < width) && (ii >= 0)) && ((jj < height) && (jj >= 0))) {
                         // Get Y channel value
-                        uchar pixel_value = *(src + ii*3 + jj * width*3);
+                        uchar pixel_value = *(src + ii * 3 + jj * width * 3);
                         // Get filter value
                         double filter_val = *(kernel + (filter_size * (k + half_w) + l + half_w));
                         // Smooth value
@@ -221,7 +226,7 @@ void find_motion_box(const uchar *image, SDL_Rect *rect, int width, int height) 
  * @param array 3 element float array
  * @return magnitude of the array
  */
-double magnitude(float * array) {
+double magnitude(float *array) {
     double pixel_mag = 0.0;
 
     // Sum up each element squared
@@ -246,7 +251,7 @@ double magnitude(float * array) {
  */
 int
 detect_motion(const uchar *new_frame, uchar **background_buffer, float *background_model, float *mask, uchar *output,
-              int *bg_model_ndx) {
+              int *bg_model_ndx, int filter_size) {
     int i;
     int j;
     uchar *pre_smoothed_output_image = malloc(WIDTH * HEIGHT * 3);
@@ -265,7 +270,11 @@ detect_motion(const uchar *new_frame, uchar **background_buffer, float *backgrou
             pixel_mag = 0;
 
             // Get pixel of the new frame
+#ifndef TEST_MODE
             yuyv_get_pixel_value(new_frame, i, j, WIDTH, new_value);
+#else
+            yuv_get_pixel_value(new_frame, i, j, WIDTH, new_value);
+#endif
             // Get bg model pixel
             bg_model_get_pixel_value(background_model, i, j, WIDTH, bg_value);
             // Get the oldest pixel of the background buffer
@@ -273,7 +282,7 @@ detect_motion(const uchar *new_frame, uchar **background_buffer, float *backgrou
 
             // For each channel
             for (int k = 0; k < 3; k++) {
-                new_out_value = (((float)new_value[k] - 127.0f) - (bg_value[k] - 127.0f)) + 127;
+                new_out_value = (((float) new_value[k] - 127.0f) - (bg_value[k] - 127.0f)) + 127;
                 new_out_value = new_out_value * *(mask + i + j);
 
                 normalized_pixel[k] = new_out_value;
@@ -292,7 +301,7 @@ detect_motion(const uchar *new_frame, uchar **background_buffer, float *backgrou
                 // If the pixel magnitude is above the threshold, its a motion pixel. Set pixel to white
                 yuv_set_pixel_value(pre_smoothed_output_image, i, j, WIDTH, YUV_WHITE);
                 // Decrease the motion mask to make this pixel less sensitive to motion
-                new_mask_value = *(mask + i + j * WIDTH) - 0.1f;
+                new_mask_value = *(mask + i + j * WIDTH) - 0.2f;
             }
 
             // Update background model by adding in new frame and removing oldest frame from the model
@@ -323,13 +332,14 @@ detect_motion(const uchar *new_frame, uchar **background_buffer, float *backgrou
     *bg_model_ndx = (*bg_model_ndx + 1) % BG_MODEL_SIZE;
 
     // Smooth motion image
-    smooth_image(pre_smoothed_output_image, WIDTH, HEIGHT, 3, output);
+    smooth_image(pre_smoothed_output_image, WIDTH, HEIGHT, filter_size, output);
 
     // Free allocated buffer
     free(pre_smoothed_output_image);
     return i * j;
 }
 
+#ifndef TEST_MODE
 /**
  * Opens webcam interface and SDL to display motion output to the user
  * @param argc number of args
@@ -358,7 +368,7 @@ int main(int argc, char *argv[]) {
 
     // Setup g_cam_info struct
     g_cam_info.fd = -1;
-    g_cam_info.dev_name = "/dev/video0";
+    g_cam_info.dev_name = argv[1];
 
     // Initialize background model buffer
     for (int i = 0; i < BG_MODEL_SIZE; i++) {
@@ -456,7 +466,7 @@ int main(int argc, char *argv[]) {
 
                         // Preform motion detection operations
                         detect_motion(current_raw_frame, background_buffer, background_model, mask, motion_image,
-                                      &bg_model_ndx);
+                                      &bg_model_ndx, FILTER_SIZE);
 
                         // Find motion box from the motion image
 
@@ -552,3 +562,179 @@ int main(int argc, char *argv[]) {
 
     return 0;
 }
+#endif
+
+#ifdef TEST_MODE
+int bytes_per_pixel = 3;   /* or 1 for GRACYSCALE images */
+int color_space = JCS_RGB;
+
+/**
+ * Reads a jpeg file from disk
+ * @param filename file location of jpeg
+ * @param raw_image image buffer to store image atain
+ * @return
+ */
+int read_jpeg_file(char *filename, uchar *raw_image) {
+    struct jpeg_decompress_struct c_info;
+    struct jpeg_error_mgr j_err;
+    JSAMPROW row_pointer[1];
+    FILE *image_file = fopen(filename, "rb");
+    unsigned long location = 0;
+    int i;
+
+    // Check if ile opened
+    if (!image_file) {
+        printf("Error opening jpeg file %s\n!", filename);
+        return -1;
+    }
+
+    // Setup decompress
+    c_info.err = jpeg_std_error(&j_err);
+
+    jpeg_create_decompress(&c_info);
+
+    jpeg_stdio_src(&c_info, image_file);
+
+    jpeg_read_header(&c_info, TRUE);
+
+    jpeg_start_decompress(&c_info);
+
+    row_pointer[0] = (unsigned char *) malloc(c_info.output_width * c_info.num_components);
+
+    // Read JPEG file in
+    while (c_info.output_scanline < c_info.image_height) {
+        jpeg_read_scanlines(&c_info, row_pointer, 1);
+        for (i = 0; i < c_info.image_width * c_info.num_components; i++)
+            raw_image[location++] = row_pointer[0][i];
+    }
+
+    // Cleanup
+    jpeg_finish_decompress(&c_info);
+    jpeg_destroy_decompress(&c_info);
+    free(row_pointer[0]);
+    fclose(image_file);
+
+    return 1;
+}
+
+#define RGBA(r, g, b, a) ((r) | ((g) << 8) | ((b) << 16) | ((a) << 24))
+
+/**
+ * Writes raw image data to a PNG file
+ *
+ * Taken from: https://github.com/misc0110/libattopng
+ * @param filename File location to save to
+ * @param image raw imageuffer
+ * @return
+ */
+int write_png_file(char *filename, uchar *image) {
+    libattopng_t *png = libattopng_new(WIDTH, HEIGHT, PNG_RGBA);
+
+    // Get the greyscale value of each pixel and save it as RG
+    for (int i = 0; i < WIDTH; i++) {
+        for (int j = 0; j < HEIGHT; j++) {
+            uchar value = *(image + i * 3 + j * WIDTH * 3);
+
+            libattopng_set_pixel(png, i, j, RGBA(value, value, value, 255));
+        }
+    }
+
+    // Write image to disk
+    if(libattopng_save(png, filename)) {
+        fprintf(stderr, "Failed to save png\n");
+        exit(-1);
+    }
+
+    // Cleanup
+    libattopng_destroy(png);
+}
+
+/**
+ * Test mode main
+ * @param arc arg count
+ * @param argv arg values: 1 - CDNET data path 2 - test length
+ * @return
+ */
+int main(int arc, char *argv[]) {
+    char in_filename[100];
+    char out_filename[100];
+    int bg_model_ndx = 0;
+    float *background_model = malloc(WIDTH * HEIGHT * 3 * sizeof(float));
+    uchar *background_buffer[BG_MODEL_SIZE];
+    uchar *motion_image = malloc(WIDTH * HEIGHT * 3);
+    float *mask = malloc(WIDTH * HEIGHT * sizeof(float));
+    uchar *raw_image = (uchar *) malloc(WIDTH * HEIGHT * 3);
+    int number_of_test_frames = atoi(argv[2]);
+    clock_t t;
+    double run_time = 0;
+
+    // Change dir to test data
+    if (chdir(argv[1])) {
+        fprintf(stderr, "Failed to change dir\n");
+        exit(-1);
+    }
+
+
+    // Makes results directory if it does not already exis
+    if (mkdir("results", S_IRWXU)) {
+        if (errno != EEXIST) {
+            fprintf(stderr, "Failed to make results dir\n");
+            exit(-1);
+        }
+    }
+
+    // Initialize background model buffer
+    for (int i = 0; i < BG_MODEL_SIZE; i++) {
+        background_buffer[i] = malloc(WIDTH * HEIGHT * 3);
+    }
+
+    // Fill motion mask with 1.0
+    for (int i = 0; i < WIDTH; i++) {
+        for (int j = 0; j < HEIGHT; j++) {
+            *(mask + i + j * WIDTH) = 1.0f;
+        }
+    }
+
+    // Run motion detector on each frame
+    for (int ndx = 1; ndx < number_of_test_frames; ndx++) {
+        snprintf(in_filename, 70, "input/in%06d.jpg", ndx);
+        snprintf(out_filename, 70, "results/bin%06d.png", ndx);
+        // Read JPEG and convert to YUV
+        if (read_jpeg_file(in_filename, raw_image) == 1) {
+            for (int i = 0; i < WIDTH * 3; i += 3) {
+                for (int j = 0; j < HEIGHT; j++) {
+                    uchar b = *(raw_image + i + j * WIDTH * 3);
+                    uchar g = *(raw_image + i + 1 + j * WIDTH * 3);
+                    uchar r = *(raw_image + i + 2 + j * WIDTH * 3);
+
+                    *(raw_image + i + j * WIDTH * 3) = (0.257 * r) + (0.504 * g) + (0.098 * b) + 16;
+                    *(raw_image + i + 1 + j * WIDTH * 3) = (0.439 * r) - (0.368 * g) - (0.071 * b) + 128;
+                    *(raw_image + i + 2 + j * WIDTH * 3) = -(0.148 * r) - (0.291 * g) + (0.439 * b) + 128;
+                }
+            }
+
+            //Run motion detection and time
+            t = clock();
+            detect_motion(raw_image, background_buffer, background_model, mask, motion_image,
+                          &bg_model_ndx, FILTER_SIZE);
+
+            run_time += ((double)(clock() - t)) / CLOCKS_PER_SEC;
+
+            // Write png
+            write_png_file(out_filename, motion_image);
+        } else {
+            exit(-1);
+        }
+
+        printf("Finished image %d\n", ndx);
+
+    }
+
+    // Print stats
+    printf("Finished in processing %d frames in %f seconds. FPS: %f\n", number_of_test_frames, run_time,
+           number_of_test_frames / run_time);
+
+    free(raw_image);
+}
+
+#endif
